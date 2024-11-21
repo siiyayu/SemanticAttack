@@ -12,7 +12,7 @@ if __name__ == '__main__':
                            attention_processor_class=AttnProcessor,
                            #  pipeline_class=StableDiffusionImg2ImgPipeline,
                            #  scheduler_class=DDIMScheduler,
-                           num_inference_steps_mask=10,
+                           num_inference_steps_mask=5,
                            mask_threshold=0.5,
                            perturbation_budget=0.06,
                            attacking_step_size=0.07,

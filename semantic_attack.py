@@ -240,64 +240,56 @@ class SemanticAttack():
 
         diffusion_timesteps = self.scheduler.timesteps
 
-        with torch.no_grad():
-            # init_latent = self.vae.encode(self.preprocessed_image).latent_dist.sample(self.generator)
-            init_latent = self.get_init_latent().to(self.device)
-            init_latent = (self.vae.config.scaling_factor * init_latent).to(self.device)
-            delta = torch.zeros(init_latent.shape).to(self.device)
+        image_adv = self.preprocessed_image.clone()
+        shape = image_adv.shape
 
+        torch.autograd.set_detect_anomaly(True)
 
         for attacking_step in tqdm(range(self.number_of_attacking_steps), total=self.number_of_attacking_steps,
                                    desc="Attacking steps"):
-            accumulated_grad = torch.zeros(init_latent.shape).to(self.device).requires_grad_(False)  # Accumulate gradient across timesteps
+            delta = torch.zeros(shape).to(self.device)
+            accumulated_grad = torch.zeros(shape).to(self.device)  # Accumulate gradient across timesteps
             for t in tqdm(diffusion_timesteps, total=len(diffusion_timesteps),
                           desc=f"Attacking step {attacking_step + 1}"):
-                with torch.autograd.profiler.profile() as prof:
-                    init_latent_adv = init_latent.clone().detach().requires_grad_(True)
-                    noise = torch.randn(init_latent_adv.shape, generator=self.generator, device=self.device)
-                    noised_adv_latent = self.scheduler.add_noise(init_latent_adv, noise, t)
+                image_adv_clone = image_adv.clone().detach().requires_grad_(True)
+                init_latent_adv = self.vae.encode(image_adv_clone).latent_dist.sample(self.generator)
+                init_latent_adv = (self.vae.config.scaling_factor * init_latent_adv).to(self.device)
 
-                    latent_model_input = torch.cat([noised_adv_latent] * 2)  # cfg
-                    latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                noise = torch.randn(init_latent_adv.shape, generator=self.generator, device=self.device)
+                noised_latent_adv = self.scheduler.add_noise(init_latent_adv, noise, t)
 
-                    masked_latent_model_input = self.mask * latent_model_input
-                    noise_pred = self.unet(
-                        masked_latent_model_input,
-                        t,
-                        encoder_hidden_states=text_embeddings,
-                        # timestep_cond=None,
-                        # cross_attention_kwargs=self.cross_attention_kwargs,
-                        # added_cond_kwargs=added_cond_kwargs,
-                        # return_dict=False,
-                    )[0]
-                    # del noise_pred
+                latent_model_input = torch.cat([noised_latent_adv] * 2)  # cfg
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                    # calculating loss
-                    attention_map = self.average_attention_maps()[:, :, 1]
-                    if init_latent_adv.grad is not None:
-                        init_latent_adv.grad.zero_()
-                    loss = torch.norm(attention_map, p=1)
-                    self.loss.append(loss.item())
-                    # loss = torch.norm(latent_model_input)
-                    loss.backward()
+                masked_latent_model_input = self.mask * latent_model_input
+                noise_pred = self.unet(
+                    masked_latent_model_input,
+                    t,
+                    encoder_hidden_states=text_embeddings,
+                    # timestep_cond=None,
+                    # cross_attention_kwargs=self.cross_attention_kwargs,
+                    # added_cond_kwargs=added_cond_kwargs,
+                    # return_dict=False,
+                )[0]
+                # del noise_pred
 
-                    ##
-                    # self.print_graph(attention_map)
-                    ##
-                    with torch.no_grad():
-                        accumulated_grad += init_latent_adv.grad
+                # calculating loss
+                attention_map = self.average_attention_maps()[:, :, 1]
+                if image_adv_clone.grad is not None:
+                    image_adv_clone.grad.zero_()
+                loss = torch.norm(attention_map, p=1)
+                self.loss.append(loss.item())
+
+                loss.backward()
+
+                accumulated_grad += image_adv_clone.grad
                 self.clean_attention_processors()
 
-                # print(prof.key_averages().table(sort_by="self_cpu_memory_usage"))
-                # for event in prof.function_events:
-                #     print(event)
             grad = accumulated_grad / len(diffusion_timesteps)
             delta = delta + self.attacking_step_size * torch.sign(grad)
             delta.clamp_(-self.perturbation_budget, self.perturbation_budget)
-            with torch.no_grad():
-                init_latent = (init_latent - delta).detach()  # Reset for next step
-
-        return init_latent
+            image_adv = (image_adv - delta)  # Reset for next step
+        return image_adv
 
     def register_custom_attention_processors(self):
         '''
