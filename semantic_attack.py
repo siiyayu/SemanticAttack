@@ -104,16 +104,15 @@ class SemanticAttack():
         resolution_to_upsample_to = 64
         to_average = []
         for key, value in self.transformer_block_name_to_attention_processor_map.items():
-            # attention_map = value.attention_maps[-num_steps:].copy()
-            # attention_map = sum(attention_map) / len(attention_map)
             avg_attention_map = value.sum_attention_maps / value.counter
             res = avg_attention_map.shape[1]
             if res == resolution_to_upsample_to:
                 to_average.append(avg_attention_map)
             else:
                 to_average.append(self.upsample_attention(avg_attention_map, resolution_to_upsample_to))
-        to_average = torch.cat(to_average, dim=0)
-        averaged = to_average.sum(dim=0) / to_average.shape[0]
+        to_average = torch.cat(to_average, dim=0) # list of (16, 64, 64, 10) (num_heads * batch, res, res, num_tokens) -> (256, 64, 64, 10)
+
+        averaged = to_average.sum(dim=0) / to_average.shape[0] # (256, 64, 64, 10) -> (64, 64, 10)
         # del to_average
         # del attention_map
         return averaged
@@ -175,9 +174,14 @@ class SemanticAttack():
         self.denoise()
         attention_map = self.average_attention_maps()
         token_attention_map = attention_map[:, :, 1]
-        masked_token_attention_map = token_attention_map * (token_attention_map > token_attention_map.max() * self.mask_threshold)
-        mask = masked_token_attention_map.unsqueeze(0).unsqueeze(0).repeat(1, self.latent_shape[1], 1, 1)
-        self.mask = mask
+        masked_token_attention_map = token_attention_map > (token_attention_map.max() * self.mask_threshold)
+        masked_token_attention_map = masked_token_attention_map.float()
+        upsampled_masked_token_attention_map = F.interpolate(masked_token_attention_map.unsqueeze(0).unsqueeze(0),
+                                                             size=(512, 512), mode='bicubic', align_corners=False)
+        upsampled_masked_token_attention_map = upsampled_masked_token_attention_map.repeat(1, 3, 1, 1)
+
+        # mask = masked_token_attention_map.unsqueeze(0).unsqueeze(0).repeat(1, self.latent_shape[1], 1, 1)
+        self.mask = upsampled_masked_token_attention_map
         self.clean_attention_processors()
 
     def clean_attention_processors(self):
@@ -245,15 +249,20 @@ class SemanticAttack():
 
         torch.autograd.set_detect_anomaly(True)
 
+        delta = torch.zeros(shape).to(self.device)
+
         for attacking_step in tqdm(range(self.number_of_attacking_steps), total=self.number_of_attacking_steps,
                                    desc="Attacking steps"):
-            delta = torch.zeros(shape).to(self.device)
+
             accumulated_grad = torch.zeros(shape).to(self.device)  # Accumulate gradient across timesteps
+
             for t in tqdm(diffusion_timesteps, total=len(diffusion_timesteps),
                           desc=f"Attacking step {attacking_step + 1}"):
                 image_adv_clone = image_adv.clone().detach().requires_grad_(True)
+                masked_image_adv = self.mask * image_adv
                 init_latent_adv = self.vae.encode(image_adv_clone).latent_dist.sample(self.generator)
                 init_latent_adv = (self.vae.config.scaling_factor * init_latent_adv).to(self.device)
+
 
                 noise = torch.randn(init_latent_adv.shape, generator=self.generator, device=self.device)
                 noised_latent_adv = self.scheduler.add_noise(init_latent_adv, noise, t)
@@ -261,7 +270,7 @@ class SemanticAttack():
                 latent_model_input = torch.cat([noised_latent_adv] * 2)  # cfg
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                masked_latent_model_input = self.mask * latent_model_input
+                masked_latent_model_input = latent_model_input
                 noise_pred = self.unet(
                     masked_latent_model_input,
                     t,
@@ -280,7 +289,7 @@ class SemanticAttack():
                 loss = torch.norm(attention_map, p=1)
                 self.loss.append(loss.item())
 
-                loss.backward()
+                loss.backward(retain_graph=True)
 
                 accumulated_grad += image_adv_clone.grad
                 self.clean_attention_processors()
