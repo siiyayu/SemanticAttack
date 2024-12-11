@@ -10,12 +10,9 @@ class AttnProcessor:
     """
     def __init__(self):
         # Initialize an empty list to store attention maps for each call
-        # self.attention_maps = []
         self.sum_attention_maps = None
         self.counter = 0
-        # self.hidden_states = []
-        # self.encoder_hidden_states = []
-        # self.attention_mask = []
+
 
     def __call__(
         self,
@@ -68,16 +65,12 @@ class AttnProcessor:
 
         res = int(np.sqrt(attention_probs.shape[1]))
         num_tokens = attention_probs.shape[-1]
-        # self.attention_maps.append(attention_probs.view(-1, res, res, num_tokens))
         attention_map = attention_probs.reshape(-1, res, res, num_tokens)
         if self.sum_attention_maps is None:
             self.sum_attention_maps = attention_map
         else:
             self.sum_attention_maps += attention_map
         self.counter += 1
-        # self.hidden_states.append(hidden_states)
-        # self.encoder_hidden_states.append(encoder_hidden_states)
-        # self.attention_mask.append(attention_mask)
 
         hidden_states = torch.bmm(attention_probs, value)
         hidden_states = attn.batch_to_head_dim(hidden_states)

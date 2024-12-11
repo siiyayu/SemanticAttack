@@ -4,11 +4,10 @@ import torch
 import numpy as np
 from PIL import Image
 import torch.nn.functional as F
-from attn_processor import AttnProcessor
+from attention_processor import AttnProcessor
 from utils import *
 from tqdm.auto import tqdm
 from memory_profiler import profile
-
 
 class SemanticAttack():
     def __init__(self,
@@ -26,7 +25,6 @@ class SemanticAttack():
         self.token = token
         self.editing_prompt = editing_prompt
         self.attention_processor_class = attention_processor_class
-        # self.attention_maps = {}
 
         # constants (move it to the sem att function
         self.mask_threshold = mask_threshold
@@ -48,7 +46,7 @@ class SemanticAttack():
                                                          use_safetensors=True)
         self.scheduler = DDIMScheduler.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="scheduler")
 
-        # Let's also save pipeline to use it's functions
+        # Using pipeline to access its functionality
         self.pipeline = StableDiffusionImg2ImgPipeline.from_pretrained("CompVis/stable-diffusion-v1-4",
                                                                        safety_checker=None,
                                                                        requires_safety_checker=False)
@@ -113,19 +111,14 @@ class SemanticAttack():
         to_average = torch.cat(to_average, dim=0) # list of (16, 64, 64, 10) (num_heads * batch, res, res, num_tokens) -> (256, 64, 64, 10)
 
         averaged = to_average.sum(dim=0) / to_average.shape[0] # (256, 64, 64, 10) -> (64, 64, 10)
-        # del to_average
-        # del attention_map
         return averaged
 
     def denoise(self):
         '''
         Generates mask using sampling from the noisy state obtained with forward pass.
         '''
-        # check_memory()
-
         # text embeddings
         text_embeddings = self.get_text_embeddings(prompt=self.token)
-        # print(get_tensor_size(text_embeddings))
 
         with torch.no_grad():
             # timesteps
@@ -135,7 +128,6 @@ class SemanticAttack():
             t_start = max(self.num_inference_steps_mask - init_timestep, 0)
 
             timesteps = self.scheduler.timesteps[t_start:]
-            num_inference_steps = self.num_inference_steps_mask - t_start
 
             # latents
             # init_latent = self.vae.encode(self.preprocessed_image).latent_dist.sample(self.generator)
@@ -173,22 +165,22 @@ class SemanticAttack():
         self.clean_attention_processors()
         self.denoise()
         attention_map = self.average_attention_maps()
-        token_attention_map = attention_map[:, :, 1]
-        masked_token_attention_map = token_attention_map > (token_attention_map.max() * self.mask_threshold)
-        masked_token_attention_map = masked_token_attention_map.float()
-        upsampled_masked_token_attention_map = F.interpolate(masked_token_attention_map.unsqueeze(0).unsqueeze(0),
+        attention_map = attention_map[:, :, 1]
+        attention_map = 255 * attention_map / attention_map.max()
+        upsampled_attention_map = F.interpolate(attention_map.unsqueeze(0).unsqueeze(0),
                                                              size=(512, 512), mode='bicubic', align_corners=False)
-        upsampled_masked_token_attention_map = upsampled_masked_token_attention_map.repeat(1, 3, 1, 1)
 
-        # mask = masked_token_attention_map.unsqueeze(0).unsqueeze(0).repeat(1, self.latent_shape[1], 1, 1)
-        self.mask = upsampled_masked_token_attention_map
+        upsampled_attention_map = upsampled_attention_map.repeat(1, 3, 1, 1)
+        mask = upsampled_attention_map > (255 * self.mask_threshold)
+        mask = mask.float()
+
+        self.mask = mask
         self.clean_attention_processors()
 
     def clean_attention_processors(self):
         for key, value in self.transformer_block_name_to_attention_processor_map.items():
             value.sum_attention_maps = None
             value.counter = 0
-        # gc.collect()
 
     def get_text_embeddings(self, prompt):
         '''
@@ -259,10 +251,10 @@ class SemanticAttack():
             for t in tqdm(diffusion_timesteps, total=len(diffusion_timesteps),
                           desc=f"Attacking step {attacking_step + 1}"):
                 image_adv_clone = image_adv.clone().detach().requires_grad_(True)
-                masked_image_adv = self.mask * image_adv
-                init_latent_adv = self.vae.encode(image_adv_clone).latent_dist.sample(self.generator)
-                init_latent_adv = (self.vae.config.scaling_factor * init_latent_adv).to(self.device)
+                masked_image_adv_clone = self.mask * image_adv_clone
 
+                init_latent_adv = self.vae.encode(masked_image_adv_clone).latent_dist.sample(self.generator)
+                init_latent_adv = (self.vae.config.scaling_factor * init_latent_adv).to(self.device)
 
                 noise = torch.randn(init_latent_adv.shape, generator=self.generator, device=self.device)
                 noised_latent_adv = self.scheduler.add_noise(init_latent_adv, noise, t)
@@ -270,17 +262,11 @@ class SemanticAttack():
                 latent_model_input = torch.cat([noised_latent_adv] * 2)  # cfg
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                masked_latent_model_input = latent_model_input
                 noise_pred = self.unet(
-                    masked_latent_model_input,
+                    latent_model_input,
                     t,
-                    encoder_hidden_states=text_embeddings,
-                    # timestep_cond=None,
-                    # cross_attention_kwargs=self.cross_attention_kwargs,
-                    # added_cond_kwargs=added_cond_kwargs,
-                    # return_dict=False,
+                    encoder_hidden_states=text_embeddings
                 )[0]
-                # del noise_pred
 
                 # calculating loss
                 attention_map = self.average_attention_maps()[:, :, 1]
@@ -289,7 +275,7 @@ class SemanticAttack():
                 loss = torch.norm(attention_map, p=1)
                 self.loss.append(loss.item())
 
-                loss.backward(retain_graph=True)
+                loss.backward()
 
                 accumulated_grad += image_adv_clone.grad
                 self.clean_attention_processors()
@@ -297,7 +283,7 @@ class SemanticAttack():
             grad = accumulated_grad / len(diffusion_timesteps)
             delta = delta + self.attacking_step_size * torch.sign(grad)
             delta.clamp_(-self.perturbation_budget, self.perturbation_budget)
-            image_adv = (image_adv - delta)  # Reset for next step
+            image_adv = image_adv - delta  # Reset for next step
         return image_adv
 
     def register_custom_attention_processors(self):
@@ -310,24 +296,4 @@ class SemanticAttack():
                 module.attn2.processor = self.attention_processor_class()
                 self.transformer_block_name_to_attention_processor_map[name] = module.attn2.processor
 
-    def show_attention_maps(self, directions, token, resolution):
-        '''
-        Shows averaged cross attention across timesteps, batch * n_heads, and layers
-        with the same resolution attention maps for a given resolution and direction.
-        direction: list, for example ["down", "up", "mid"]
-        token: int, for example 1
-        resolution: int for example 16
-        '''
-        filtered_attention_sums = []
-        for key, value in self.transformer_block_name_to_attention_processor.items():
-            dir = key.split("_")[0]
-            res = value.sum_attention_maps.shape[1]
-            if dir in directions and res == resolution:
-                filtered_attention_sums.append(value.sum_attention_maps)
-        filtered_attention_sums = torch.cat(filtered_attention_sums, dim=0)
-        filtered_attention_sums = filtered_attention_sums.sum(dim=0) / filtered_attention_sums.shape[0]
-        filtered_attention_sums = filtered_attention_sums[:, :, token]
-        filtered_attention_sums = 255 * filtered_attention_sums / filtered_attention_sums.max()
-        filtered_attention_sums = filtered_attention_sums.unsqueeze(-1).expand(*filtered_attention_sums.shape, 3)
-        filtered_attention_sums = filtered_attention_sums.numpy().astype(np.uint8)
-        return Image.fromarray(filtered_attention_sums).resize((256, 256))
+
