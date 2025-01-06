@@ -10,16 +10,17 @@ Existing approaches:
 * Image Immunization (Diffvax)
 
 
-## The mechanism for immunization is based on attacking the cross-attention layers of a denoising U-Net
+## Method
+The mechanism for immunization is based on attacking the cross-attention layers of a denoising U-Net
 - Creating mask by averaging cross-attention maps correspondent to a token
-- Token represents immunized object
-- Applying mask on the image
+- Token represents an immunized object
+- Applying a mask on the image
 - 2 cycles: epochs and diffusion
-- Calculating loss using L1 norm of the averaged attention responses for different diffusion steps
+- Calculating loss using the L1 norm of the averaged attention responses for different diffusion steps
 - Estimating perturbations using the projected gradient descent on the immunized image
 - Applying the estimated perturbations on the image for each attacking step
 
-## Disussions&Conclusions
+## Disussion&Conclusion
 
 - The absence of code and details of implementation in the paper make it hard to reproduce
 - The model is quite slow: it takes 20-30 minutes on 1 image using A100 GPU on Colab
