@@ -3,7 +3,8 @@ Implemented [Distraction is All You Need: Memory-Efficient Image Immunization ag
 ## Motivation
 - Easy to manipulate image content for malicious purposes using diffusion models
 - Want to protect images from being edited
-- Existing approaches:
+  
+Existing approaches:
 * Encoder/decoder attack
 * Semantic Attack (Distraction is All You Need)
 * Image Immunization (Diffvax)
