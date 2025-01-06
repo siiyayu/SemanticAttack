@@ -1,1 +1,1 @@
-Distraction is All You Need: Memory-Efficient Image Immunization against Diffusion-Based Image Editing
+[Distraction is All You Need: Memory-Efficient Image Immunization against Diffusion-Based Image Editing](https://openaccess.thecvf.com/content/CVPR2024/papers/Lo_Distraction_is_All_You_Need_Memory-Efficient_Image_Immunization_against_Diffusion-Based_CVPR_2024_paper.pdf)
